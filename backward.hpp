@@ -49,6 +49,9 @@
 // #define BACKWARD_SYSTEM_LINUX
 //	- specialization for linux
 //
+// #define BACKWARD_SYSTEM_FREEBSD
+//	- specialization for FreeBSD
+//
 // #define BACKWARD_SYSTEM_DARWIN
 //	- specialization for Mac OS X 10.5 and later.
 //
@@ -59,11 +62,14 @@
 //	- placebo implementation, does nothing.
 //
 #if defined(BACKWARD_SYSTEM_LINUX)
+#elif defined(BACKWARD_SYSTEM_FREEBSD)
 #elif defined(BACKWARD_SYSTEM_DARWIN)
 #elif defined(BACKWARD_SYSTEM_UNKNOWN)
 #elif defined(BACKWARD_SYSTEM_WINDOWS)
 #else
-#if defined(__linux) || defined(__linux__)
+#if defined(__FreeBSD__)
+#define BACKWARD_SYSTEM_FREEBSD
+#elif defined(__linux) || defined(__linux__)
 #define BACKWARD_SYSTEM_LINUX
 #elif defined(__APPLE__)
 #define BACKWARD_SYSTEM_DARWIN
@@ -263,6 +269,75 @@
 
 #endif // defined(BACKWARD_SYSTEM_LINUX)
 
+#if defined(BACKWARD_SYSTEM_FREEBSD)
+
+// On FreeBSD, backward can walk the stack using the compiler's unwind API,
+// libunwind, or backtrace(). The default is the unwind API, which is provided
+// by the base system toolchain.
+//
+// Note that only one of the define should be set to 1 at a time.
+//
+#if BACKWARD_HAS_UNWIND == 1
+#elif BACKWARD_HAS_LIBUNWIND == 1
+#elif BACKWARD_HAS_BACKTRACE == 1
+#else
+#undef BACKWARD_HAS_UNWIND
+#define BACKWARD_HAS_UNWIND 1
+#undef BACKWARD_HAS_LIBUNWIND
+#define BACKWARD_HAS_LIBUNWIND 0
+#undef BACKWARD_HAS_BACKTRACE
+#define BACKWARD_HAS_BACKTRACE 0
+#endif
+
+// On FreeBSD, backward can extract detailed information about a stack trace
+// using libbfd (from binutils) or, as a fallback, backtrace_symbols().
+//
+// libdw is not supported: it is part of elfutils, whereas FreeBSD ships the
+// ELF Tool Chain implementation instead.
+//
+// Note that only one of the define should be set to 1 at a time.
+//
+#if BACKWARD_HAS_BFD == 1
+#elif BACKWARD_HAS_BACKTRACE_SYMBOL == 1
+#else
+#undef BACKWARD_HAS_BFD
+#define BACKWARD_HAS_BFD 0
+#undef BACKWARD_HAS_BACKTRACE_SYMBOL
+#define BACKWARD_HAS_BACKTRACE_SYMBOL 1
+#endif
+
+#include <cxxabi.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <link.h>
+#include <pthread.h>
+#include <pthread_np.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+#if BACKWARD_HAS_BFD == 1
+//              NOTE: defining PACKAGE{,_VERSION} is required before including
+//                    bfd.h on some platforms, see also:
+//                    https://sourceware.org/bugzilla/show_bug.cgi?id=14243
+#ifndef PACKAGE
+#define PACKAGE
+#endif
+#ifndef PACKAGE_VERSION
+#define PACKAGE_VERSION
+#endif
+#include <bfd.h>
+#endif
+
+#if (BACKWARD_HAS_BACKTRACE == 1) || (BACKWARD_HAS_BACKTRACE_SYMBOL == 1)
+#include <execinfo.h>
+#endif
+
+#endif // defined(BACKWARD_SYSTEM_FREEBSD)
+
 #if defined(BACKWARD_SYSTEM_DARWIN)
 // On Darwin, backtrace can back-trace or "walk" the stack using the following
 // libraries:
@@ -452,12 +527,15 @@ namespace backward {
 namespace system_tag {
 struct linux_tag; // seems that I cannot call that "linux" because the name
 // is already defined... so I am adding _tag everywhere.
+struct freebsd_tag;
 struct darwin_tag;
 struct windows_tag;
 struct unknown_tag;
 
 #if defined(BACKWARD_SYSTEM_LINUX)
 typedef linux_tag current_tag;
+#elif defined(BACKWARD_SYSTEM_FREEBSD)
+typedef freebsd_tag current_tag;
 #elif defined(BACKWARD_SYSTEM_DARWIN)
 typedef darwin_tag current_tag;
 #elif defined(BACKWARD_SYSTEM_WINDOWS)
@@ -482,6 +560,17 @@ typedef libdw current;
 typedef libbfd current;
 #elif BACKWARD_HAS_DWARF == 1
 typedef libdwarf current;
+#elif BACKWARD_HAS_BACKTRACE_SYMBOL == 1
+typedef backtrace_symbol current;
+#else
+#error "You shall not pass, until you know what you want."
+#endif
+#elif defined(BACKWARD_SYSTEM_FREEBSD)
+struct libbfd;
+struct backtrace_symbol;
+
+#if BACKWARD_HAS_BFD == 1
+typedef libbfd current;
 #elif BACKWARD_HAS_BACKTRACE_SYMBOL == 1
 typedef backtrace_symbol current;
 #else
@@ -612,7 +701,8 @@ template <typename TAG> struct demangler_impl {
   static std::string demangle(const char *funcname) { return funcname; }
 };
 
-#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_DARWIN)
+#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_FREEBSD) ||     \
+    defined(BACKWARD_SYSTEM_DARWIN)
 
 template <> struct demangler_impl<system_tag::current_tag> {
   demangler_impl() : _demangle_buffer_length(0) {}
@@ -633,8 +723,8 @@ private:
   size_t _demangle_buffer_length;
 };
 
-#endif // BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_DARWIN
-
+#endif // BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_FREEBSD ||
+       // BACKWARD_SYSTEM_DARWIN
 struct demangler : public demangler_impl<system_tag::current_tag> {};
 
 // Split a string on the platform's PATH delimiter.  Example: if delimiter
@@ -750,6 +840,12 @@ protected:
     if (_thread_id == static_cast<size_t>(getpid())) {
       // If the thread is the main one, let's hide that.
       // I like to keep little secret sometimes.
+      _thread_id = 0;
+    }
+#elif defined(BACKWARD_SYSTEM_FREEBSD)
+    _thread_id = static_cast<size_t>(pthread_getthreadid_np());
+    if (pthread_main_np() == 1) {
+      // If the thread is the main one, let's hide that.
       _thread_id = 0;
     }
 #elif defined(BACKWARD_SYSTEM_DARWIN)
@@ -1287,12 +1383,12 @@ template <> class TraceResolverImpl<system_tag::unknown_tag>
 
 #endif
 
-#ifdef BACKWARD_SYSTEM_LINUX
+#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_FREEBSD)
 
-class TraceResolverLinuxBase : public TraceResolverImplBase {
+class TraceResolverELFBase : public TraceResolverImplBase {
 public:
-  TraceResolverLinuxBase()
-      : argv0_(get_argv0()), exec_path_(read_symlink("/proc/self/exe")) {}
+  TraceResolverELFBase() : argv0_(get_argv0()), exec_path_(get_exec_path()) {}
+
   std::string resolve_exec_path(Dl_info &symbol_info) const {
     // mutates symbol_info.dli_fname to be filename to open and returns filename
     // to display
@@ -1300,9 +1396,11 @@ public:
       // dladdr returns argv[0] in dli_fname for symbols contained in
       // the main executable, which is not a valid path if the
       // executable was found by a search of the PATH environment
-      // variable; In that case, we actually open /proc/self/exe, which
-      // is always the actual executable (even if it was deleted/replaced!)
-      // but display the path that /proc/self/exe links to.
+      // variable.
+#if defined(BACKWARD_SYSTEM_LINUX)
+      // On Linux we can open /proc/self/exe, which is always the actual
+      // executable (even if it was deleted/replaced!) but display the path
+      // that /proc/self/exe links to.
       // However, this right away reduces probability of successful symbol
       // resolution, because libbfd may try to find *.debug files in the
       // same dir, in case symbols are stripped. As a result, it may try
@@ -1310,6 +1408,7 @@ public:
       // not exist. /proc/self/exe is a last resort. First load attempt
       // should go for the original executable file path.
       symbol_info.dli_fname = "/proc/self/exe";
+#endif
       return exec_path_;
     } else {
       return symbol_info.dli_fname;
@@ -1320,12 +1419,15 @@ private:
   std::string argv0_;
   std::string exec_path_;
 
+#if defined(BACKWARD_SYSTEM_LINUX)
   static std::string get_argv0() {
     std::string argv0;
     std::ifstream ifs("/proc/self/cmdline");
     std::getline(ifs, argv0, '\0');
     return argv0;
   }
+
+  static std::string get_exec_path() { return read_symlink("/proc/self/exe"); }
 
   static std::string read_symlink(std::string const &symlink_path) {
     std::string path;
@@ -1347,7 +1449,49 @@ private:
 
     return path;
   }
+#elif defined(BACKWARD_SYSTEM_FREEBSD)
+  // FreeBSD does not mount procfs by default, so argv[0] and the executable
+  // path are both obtained through sysctl(3) instead.
+  static std::string get_argv0() {
+    std::string argv0 = get_proc_string(KERN_PROC_ARGS);
+    size_t end = argv0.find('\0');
+    if (end != std::string::npos) {
+      argv0.resize(end);
+    }
+    return argv0;
+  }
+
+  static std::string get_exec_path() {
+    return get_proc_string(KERN_PROC_PATHNAME);
+  }
+
+  static std::string get_proc_string(int what) {
+    int mib[4];
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = what;
+    mib[3] = -1; // the calling process
+
+    size_t size = 0;
+    if (sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size == 0) {
+      return "";
+    }
+
+    std::string value(size, '\0');
+    if (sysctl(mib, 4, &value[0], &size, nullptr, 0) != 0) {
+      return "";
+    }
+
+    value.resize(size);
+    if (!value.empty() && value[value.size() - 1] == '\0') {
+      value.resize(value.size() - 1);
+    }
+    return value;
+  }
+#endif
 };
+
+typedef TraceResolverELFBase TraceResolverLinuxBase;
 
 template <typename STACKTRACE_TAG> class TraceResolverLinuxImpl;
 
@@ -1668,9 +1812,9 @@ private:
       return r; // damned, that's a stripped file that you got there!
     }
 
-    r->handle = move(bfd_handle);
-    r->symtab = move(symtab);
-    r->dynamic_symtab = move(dynamic_symtab);
+    r->handle = std::move(bfd_handle);
+    r->symtab = std::move(symtab);
+    r->dynamic_symtab = std::move(dynamic_symtab);
     return r;
   }
 
@@ -3504,11 +3648,17 @@ private:
 };
 #endif // BACKWARD_HAS_DWARF == 1
 
+#if defined(BACKWARD_SYSTEM_LINUX)
 template <>
 class TraceResolverImpl<system_tag::linux_tag>
     : public TraceResolverLinuxImpl<trace_resolver_tag::current> {};
+#elif defined(BACKWARD_SYSTEM_FREEBSD)
+template <>
+class TraceResolverImpl<system_tag::freebsd_tag>
+    : public TraceResolverLinuxImpl<trace_resolver_tag::current> {};
+#endif
 
-#endif // BACKWARD_SYSTEM_LINUX
+#endif // BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_FREEBSD
 
 #ifdef BACKWARD_SYSTEM_DARWIN
 
@@ -3968,7 +4118,7 @@ private:
   std::vector<char> buffer;
 };
 
-#ifdef BACKWARD_SYSTEM_LINUX
+#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_FREEBSD)
 
 namespace Color {
 enum type { yellow = 33, purple = 35, reset = 39 };
@@ -4009,7 +4159,7 @@ private:
   bool _enabled;
 };
 
-#else // ndef BACKWARD_SYSTEM_LINUX
+#else // ndef BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_FREEBSD
 
 namespace Color {
 enum type { yellow = 0, purple = 0, reset = 0 };
@@ -4023,7 +4173,7 @@ public:
   void set_color(Color::type) {}
 };
 
-#endif // BACKWARD_SYSTEM_LINUX
+#endif // BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_FREEBSD
 
 class Printer {
 public:
@@ -4190,8 +4340,8 @@ private:
 
 /*************** SIGNALS HANDLING ***************/
 
-#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_DARWIN)
-
+#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_FREEBSD) ||     \
+    defined(BACKWARD_SYSTEM_DARWIN)
 class SignalHandling {
 public:
   static std::vector<int> make_default_signals() {
@@ -4270,6 +4420,11 @@ public:
     error_addr = reinterpret_cast<void *>(uctx->uc_mcontext.gregs[REG_RIP]);
 #elif defined(REG_EIP) // x86_32
     error_addr = reinterpret_cast<void *>(uctx->uc_mcontext.gregs[REG_EIP]);
+#elif defined(BACKWARD_SYSTEM_FREEBSD) && defined(__x86_64__)
+    error_addr = reinterpret_cast<void *>(uctx->uc_mcontext.mc_rip);
+#elif defined(BACKWARD_SYSTEM_FREEBSD) && defined(__aarch64__)
+    error_addr = reinterpret_cast<void *>(uctx->uc_mcontext.mc_gpregs.gp_elr);
+#elif defined(__arm__)   
 #elif defined(__arm__)
     error_addr = reinterpret_cast<void *>(uctx->uc_mcontext.arm_pc);
 #elif defined(__aarch64__)
@@ -4338,7 +4493,8 @@ private:
   }
 };
 
-#endif // BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_DARWIN
+#endif // BACKWARD_SYSTEM_LINUX || BACKWARD_SYSTEM_FREEBSD ||
+       // BACKWARD_SYSTEM_DARWIN
 
 #ifdef BACKWARD_SYSTEM_WINDOWS
 

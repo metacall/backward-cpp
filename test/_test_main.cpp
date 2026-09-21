@@ -29,6 +29,7 @@
 #include <windows.h>
 #define strcasecmp _stricmp
 #else
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -43,7 +44,7 @@ char argv0[MAX_PATH];
 inline const char *getprogname() {
   return GetModuleFileName(NULL, argv0, sizeof(argv0)) ? argv0 : NULL;
 }
-#elif !defined(__APPLE__)
+#elif !defined(__APPLE__) && !defined(__FreeBSD__)
 // N.B.  getprogname() is an Apple/BSD-ism.
 // program_invocation_name is a GLIBC-ism, but it's also
 //  supported by libmusl.

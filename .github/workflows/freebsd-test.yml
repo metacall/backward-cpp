@@ -1,0 +1,27 @@
+name: FreeBSD Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+jobs:
+  build:
+    name: FreeBSD Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run FreeBSD VM
+        uses: cross-platform-actions/action@v1.3.0
+        with:
+          operating_system: freebsd
+          version: 14.2
+          architecture: x86-64
+          shell: sh
+          run: |
+            sudo pkg install -y cmake binutils
+            cmake -S . -B build
+            cmake --build build
+            cd build && ctest --output-on-failure
